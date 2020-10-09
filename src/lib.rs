@@ -88,13 +88,18 @@
 use slog::Drain;
 use slog::Key;
 use slog::*;
-use std::cell::RefCell;
-use std::io::Write as IoWrite;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::result;
+use std::{cell::RefCell, collections::HashMap};
 use std::{fmt, io, mem, sync};
+use std::{io::Write as IoWrite, ops::Deref};
 // }}}
 
+const FILE: &str = "__file";
+const LINE: &str = "__line";
+const COLUMN: &str = "__column";
+const MODPATH: &str = "__modpath";
+const TARGET: &str = "__target";
 // {{{ Decorator
 /// Output decorator
 ///
@@ -247,13 +252,39 @@ pub fn print_msg_header(
     write!(rd, " ")?;
 
     rd.start_location()?;
-    write!(
-        rd,
-        "[{}:{}:{}]",
-        record.location().file,
-        record.location().line,
-        record.location().column
-    )?;
+    let mut collector = CollectSerializer::default();
+    record.kv().serialize(record, &mut collector)?;
+
+    match (
+        collector.get(FILE),
+        collector.get(LINE),
+        collector.get(COLUMN),
+    ) {
+        (None, None, None) | (None, None, Some(_)) | (None, Some(_), None) => {
+            write!(
+                rd,
+                "[{}:{}:{}]",
+                record.location().file,
+                record.location().line,
+                record.location().column
+            )?;
+        }
+        (None, Some(line), Some(col)) => {
+            write!(rd, "[{}:{}:{}]", record.location().file, line, col)?;
+        }
+        (Some(file), None, None) => {
+            write!(rd, "[{}]", file)?;
+        }
+        (Some(file), None, Some(_)) => {
+            write!(rd, "[{}]", file)?;
+        }
+        (Some(file), Some(line), None) => {
+            write!(rd, "[{}:{}]", file, line)?;
+        }
+        (Some(file), Some(line), Some(col)) => {
+            write!(rd, "[{}:{}:{}]", file, line, col)?;
+        }
+    }
 
     rd.start_whitespace()?;
     write!(rd, " ")?;
@@ -403,141 +434,118 @@ where
     }
 }
 // }}}
-
-// {{{ CompactFormat
-/// Compact terminal-output formatting `Drain`
-///
-/// **Note**: Compact logging format is not `Sync` (thread-safe) and needs to be
-/// synchronized externally, as current output depends on the previous one.
-///
-/// Put it into a `std::sync::Mutex` or `slog_async::Async` worker-thread to
-/// serialize accesses to it.
-pub struct CompactFormat<D>
-where
-    D: Decorator,
-{
-    decorator: D,
-    history: RefCell<Vec<(Vec<u8>, Vec<u8>)>>,
-    fn_timestamp: Box<dyn ThreadSafeTimestampFn<Output = io::Result<()>>>,
+#[derive(Default)]
+struct CollectSerializer {
+    values: HashMap<&'static str, String>,
 }
 
-/// Streamer builder
-pub struct CompactFormatBuilder<D>
-where
-    D: Decorator,
-{
-    decorator: D,
-    fn_timestamp: Box<dyn ThreadSafeTimestampFn<Output = io::Result<()>>>,
-}
+impl Deref for CollectSerializer {
+    type Target = HashMap<&'static str, String>;
 
-impl<D> CompactFormatBuilder<D>
-where
-    D: Decorator,
-{
-    /// Use the UTC time zone for the timestamp
-    pub fn use_utc_timestamp(mut self) -> Self {
-        self.fn_timestamp = Box::new(timestamp_utc);
-        self
-    }
-
-    /// Use the local time zone for the timestamp (default)
-    pub fn use_local_timestamp(mut self) -> Self {
-        self.fn_timestamp = Box::new(timestamp_local);
-        self
-    }
-
-    /// Provide a custom function to generate the timestamp
-    pub fn use_custom_timestamp<F>(mut self, f: F) -> Self
-    where
-        F: ThreadSafeTimestampFn,
-    {
-        self.fn_timestamp = Box::new(f);
-        self
-    }
-
-    /// Build the streamer
-    pub fn build(self) -> CompactFormat<D> {
-        CompactFormat {
-            decorator: self.decorator,
-            fn_timestamp: self.fn_timestamp,
-            history: RefCell::new(vec![]),
-        }
+    fn deref(&self) -> &Self::Target {
+        &self.values
     }
 }
 
-impl<D> Drain for CompactFormat<D>
-where
-    D: Decorator,
-{
-    type Ok = ();
-    type Err = io::Error;
+impl slog::ser::Serializer for CollectSerializer {
+    fn emit_none(&mut self, key: Key) -> slog::Result {
+        self.values.insert(key, String::from("None"));
+        Ok(())
+    }
+    fn emit_unit(&mut self, key: Key) -> slog::Result {
+        self.values.insert(key, String::from("()"));
+        Ok(())
+    }
 
-    fn log(
-        &self,
-        record: &Record,
-        values: &OwnedKVList,
-    ) -> result::Result<Self::Ok, Self::Err> {
-        self.format_compact(record, values)
+    fn emit_bool(&mut self, key: Key, val: bool) -> slog::Result {
+        self.values.insert(key, format!("{:?}", val));
+        Ok(())
+    }
+
+    fn emit_char(&mut self, key: Key, val: char) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+
+    fn emit_usize(&mut self, key: Key, val: usize) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_isize(&mut self, key: Key, val: isize) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+
+    fn emit_u8(&mut self, key: Key, val: u8) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_i8(&mut self, key: Key, val: i8) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_u16(&mut self, key: Key, val: u16) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_i16(&mut self, key: Key, val: i16) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_u32(&mut self, key: Key, val: u32) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_i32(&mut self, key: Key, val: i32) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_f32(&mut self, key: Key, val: f32) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_u64(&mut self, key: Key, val: u64) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_i64(&mut self, key: Key, val: i64) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_f64(&mut self, key: Key, val: f64) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    fn emit_str(&mut self, key: Key, val: &str) -> slog::Result {
+        self.values.insert(key, String::from(val));
+        Ok(())
+    }
+    fn emit_arguments(
+        &mut self,
+        key: Key,
+        val: &fmt::Arguments,
+    ) -> slog::Result {
+        self.values.insert(key, format!("{}", val));
+        Ok(())
+    }
+    #[cfg(feature = "nested-values")]
+    fn emit_serde(
+        &mut self,
+        key: Key,
+        val: &dyn slog::SerdeValue,
+    ) -> slog::Result {
+        let mut writer = Vec::new();
+        serde::ser::Serialize::serialize(
+            val.as_serde(),
+            &mut serde_json::Serializer::new(&mut writer),
+        )
+        .map_err(|e| std::io::Error::from(e))?;
+        let val =
+            std::str::from_utf8(&writer).expect("serde JSON is always UTF-8");
+        self.values.insert(key, format!("{}", val));
+        Ok(())
     }
 }
-
-impl<D> CompactFormat<D>
-where
-    D: Decorator,
-{
-    /// New `CompactFormatBuilder`
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(d: D) -> CompactFormatBuilder<D> {
-        CompactFormatBuilder {
-            fn_timestamp: Box::new(timestamp_local),
-            decorator: d,
-        }
-    }
-
-    fn format_compact(
-        &self,
-        record: &Record,
-        values: &OwnedKVList,
-    ) -> io::Result<()> {
-        self.decorator.with_record(record, values, |decorator| {
-            let indent = {
-                let mut history_ref = self.history.borrow_mut();
-                let mut serializer =
-                    CompactFormatSerializer::new(decorator, &mut *history_ref);
-
-                values.serialize(record, &mut serializer)?;
-
-                serializer.finish()?
-            };
-
-            decorator.start_whitespace()?;
-
-            for _ in 0..indent {
-                write!(decorator, " ")?;
-            }
-
-            let comma_needed =
-                print_msg_header(&*self.fn_timestamp, decorator, record)?;
-            {
-                let mut serializer =
-                    Serializer::new(decorator, comma_needed, false);
-
-                record.kv().serialize(record, &mut serializer)?;
-
-                serializer.finish()?;
-            }
-
-            decorator.start_whitespace()?;
-            writeln!(decorator)?;
-
-            decorator.flush()?;
-
-            Ok(())
-        })
-    }
-}
-// }}}
-
 // {{{ Serializer
 /// Serializer for the lines
 pub struct Serializer<'a> {
@@ -687,7 +695,9 @@ impl<'a> slog::ser::Serializer for Serializer<'a> {
         Ok(())
     }
     fn emit_str(&mut self, key: Key, val: &str) -> slog::Result {
-        s!(self, key, val);
+        if ![FILE, LINE, COLUMN, MODPATH, TARGET].contains(&key) {
+            s!(self, key, val);
+        }
         Ok(())
     }
     fn emit_arguments(
@@ -714,6 +724,140 @@ impl<'a> slog::ser::Serializer for Serializer<'a> {
             std::str::from_utf8(&writer).expect("serde JSON is always UTF-8");
         s!(self, key, val);
         Ok(())
+    }
+}
+// }}}
+
+// {{{ CompactFormat
+/// Compact terminal-output formatting `Drain`
+///
+/// **Note**: Compact logging format is not `Sync` (thread-safe) and needs to be
+/// synchronized externally, as current output depends on the previous one.
+///
+/// Put it into a `std::sync::Mutex` or `slog_async::Async` worker-thread to
+/// serialize accesses to it.
+pub struct CompactFormat<D>
+where
+    D: Decorator,
+{
+    decorator: D,
+    history: RefCell<Vec<(Vec<u8>, Vec<u8>)>>,
+    fn_timestamp: Box<dyn ThreadSafeTimestampFn<Output = io::Result<()>>>,
+}
+
+/// Streamer builder
+pub struct CompactFormatBuilder<D>
+where
+    D: Decorator,
+{
+    decorator: D,
+    fn_timestamp: Box<dyn ThreadSafeTimestampFn<Output = io::Result<()>>>,
+}
+
+impl<D> CompactFormatBuilder<D>
+where
+    D: Decorator,
+{
+    /// Use the UTC time zone for the timestamp
+    pub fn use_utc_timestamp(mut self) -> Self {
+        self.fn_timestamp = Box::new(timestamp_utc);
+        self
+    }
+
+    /// Use the local time zone for the timestamp (default)
+    pub fn use_local_timestamp(mut self) -> Self {
+        self.fn_timestamp = Box::new(timestamp_local);
+        self
+    }
+
+    /// Provide a custom function to generate the timestamp
+    pub fn use_custom_timestamp<F>(mut self, f: F) -> Self
+    where
+        F: ThreadSafeTimestampFn,
+    {
+        self.fn_timestamp = Box::new(f);
+        self
+    }
+
+    /// Build the streamer
+    pub fn build(self) -> CompactFormat<D> {
+        CompactFormat {
+            decorator: self.decorator,
+            fn_timestamp: self.fn_timestamp,
+            history: RefCell::new(vec![]),
+        }
+    }
+}
+
+impl<D> Drain for CompactFormat<D>
+where
+    D: Decorator,
+{
+    type Ok = ();
+    type Err = io::Error;
+
+    fn log(
+        &self,
+        record: &Record,
+        values: &OwnedKVList,
+    ) -> result::Result<Self::Ok, Self::Err> {
+        self.format_compact(record, values)
+    }
+}
+
+impl<D> CompactFormat<D>
+where
+    D: Decorator,
+{
+    /// New `CompactFormatBuilder`
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(d: D) -> CompactFormatBuilder<D> {
+        CompactFormatBuilder {
+            fn_timestamp: Box::new(timestamp_local),
+            decorator: d,
+        }
+    }
+
+    fn format_compact(
+        &self,
+        record: &Record,
+        values: &OwnedKVList,
+    ) -> io::Result<()> {
+        self.decorator.with_record(record, values, |decorator| {
+            let indent = {
+                let mut history_ref = self.history.borrow_mut();
+                let mut serializer =
+                    CompactFormatSerializer::new(decorator, &mut *history_ref);
+
+                values.serialize(record, &mut serializer)?;
+
+                serializer.finish()?
+            };
+
+            decorator.start_whitespace()?;
+
+            for _ in 0..indent {
+                write!(decorator, " ")?;
+            }
+
+            let comma_needed =
+                print_msg_header(&*self.fn_timestamp, decorator, record)?;
+            {
+                let mut serializer =
+                    Serializer::new(decorator, comma_needed, false);
+
+                record.kv().serialize(record, &mut serializer)?;
+
+                serializer.finish()?;
+            }
+
+            decorator.start_whitespace()?;
+            writeln!(decorator)?;
+
+            decorator.flush()?;
+
+            Ok(())
+        })
     }
 }
 // }}}
@@ -1413,13 +1557,13 @@ impl<'a> RecordDecorator for TermRecordDecorator<'a> {
         if !self.use_color {
             return Ok(());
         }
-        match self.term {
-            &mut AnyTerminal::Stdout {
+        match *self.term {
+            AnyTerminal::Stdout {
                 ref mut term,
                 supports_reset,
                 ..
             } if supports_reset => term.reset(),
-            &mut AnyTerminal::Stderr {
+            AnyTerminal::Stderr {
                 ref mut term,
                 supports_reset,
                 ..
@@ -1434,13 +1578,13 @@ impl<'a> RecordDecorator for TermRecordDecorator<'a> {
             return Ok(());
         }
         let color = TermDecorator::level_to_color(self.level);
-        match self.term {
-            &mut AnyTerminal::Stdout {
+        match *self.term {
+            AnyTerminal::Stdout {
                 ref mut term,
                 supports_color,
                 ..
             } if supports_color => term.fg(color as term::color::Color),
-            &mut AnyTerminal::Stderr {
+            AnyTerminal::Stderr {
                 ref mut term,
                 supports_color,
                 ..
@@ -1541,13 +1685,6 @@ impl io::Write for TestStdoutWriter {
     }
 }
 // }}}
-
-// {{{ Helpers
-/// Create a `CompactFormat` drain with default settings
-pub fn term_compact() -> CompactFormat<TermDecorator> {
-    let decorator = TermDecorator::new().build();
-    CompactFormat::new(decorator).build()
-}
 
 /// Create a `FullFormat` drain with default settings
 pub fn term_full() -> FullFormat<TermDecorator> {
