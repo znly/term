@@ -172,6 +172,11 @@ pub trait RecordDecorator: io::Write {
         self.reset()
     }
 
+    /// Format a file location
+    fn start_location(&mut self) -> io::Result<()> {
+        self.reset()
+    }
+
     /// Format value
     fn start_separator(&mut self) -> io::Result<()> {
         self.reset()
@@ -216,6 +221,11 @@ impl RecordDecorator for Box<dyn RecordDecorator> {
         (**self).start_value()
     }
 
+    /// Format file location
+    fn start_location(&mut self) -> io::Result<()> {
+        (**self).start_location()
+    }
+
     /// Format value
     fn start_separator(&mut self) -> io::Result<()> {
         (**self).start_separator()
@@ -232,6 +242,18 @@ pub fn print_msg_header(
 ) -> io::Result<bool> {
     rd.start_timestamp()?;
     fn_timestamp(&mut rd)?;
+
+    rd.start_whitespace()?;
+    write!(rd, " ")?;
+
+    rd.start_location()?;
+    write!(
+        rd,
+        "[{}:{}:{}]",
+        record.location().file,
+        record.location().line,
+        record.location().column
+    )?;
 
     rd.start_whitespace()?;
     write!(rd, " ")?;
