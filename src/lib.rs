@@ -99,7 +99,28 @@ const FILE: &str = "__file";
 const LINE: &str = "__line";
 const COLUMN: &str = "__column";
 const MODPATH: &str = "__modpath";
+const MOD: &str = "__module";
+const FUNCTION: &str = "__function";
 const TARGET: &str = "__target";
+const LOG_FILE: &str = "log.file";
+const LOG_MODPATH: &str = "log.module_path";
+const LOG_TARGET: &str = "log.target";
+const LOG_COLUMN: &str = "log.column";
+const LOG_LINE: &str = "log.line";
+const LABELS_TO_EXCLUDE: &[&str] = &[
+    FILE,
+    LINE,
+    COLUMN,
+    MODPATH,
+    MOD,
+    FUNCTION,
+    TARGET,
+    LOG_FILE,
+    LOG_MODPATH,
+    LOG_TARGET,
+    LOG_COLUMN,
+    LOG_LINE,
+];
 // {{{ Decorator
 /// Output decorator
 ///
@@ -251,46 +272,55 @@ pub fn print_msg_header(
     rd.start_whitespace()?;
     write!(rd, " ")?;
 
+    rd.start_level()?;
+    write!(rd, "{}", record.level().as_short_str())?;
+
     rd.start_location()?;
     let mut collector = CollectSerializer::default();
     record.kv().serialize(record, &mut collector)?;
 
-    match (
-        collector.get(FILE),
-        collector.get(LINE),
-        collector.get(COLUMN),
-    ) {
-        (None, None, None) | (None, None, Some(_)) | (None, Some(_), None) => {
-            write!(
-                rd,
-                "[{}:{}:{}]",
-                record.location().file,
-                record.location().line,
-                record.location().column
-            )?;
-        }
-        (None, Some(line), Some(col)) => {
-            write!(rd, "[{}:{}:{}]", record.location().file, line, col)?;
-        }
-        (Some(file), None, None) => {
-            write!(rd, "[{}]", file)?;
-        }
-        (Some(file), None, Some(_)) => {
-            write!(rd, "[{}]", file)?;
-        }
-        (Some(file), Some(line), None) => {
-            write!(rd, "[{}:{}]", file, line)?;
-        }
-        (Some(file), Some(line), Some(col)) => {
-            write!(rd, "[{}:{}:{}]", file, line, col)?;
+    if !record.location().file.is_empty() {
+        write!(
+            rd,
+            "[{}:{}:{}]",
+            record.location().file,
+            record.location().line,
+            record.location().column
+        )?;
+    } else {
+        match (
+            collector.get(LOG_FILE),
+            collector.get(LOG_LINE),
+            collector.get(LOG_COLUMN),
+        ) {
+            (None, None, None)
+            | (None, None, Some(_))
+            | (None, Some(_), None) => {
+                write!(
+                    rd,
+                    "[{}:{}:{}]",
+                    record.location().file,
+                    record.location().line,
+                    record.location().column
+                )?;
+            }
+            (None, Some(line), Some(col)) => {
+                write!(rd, "[-:{}:{}]", line, col)?;
+            }
+            (Some(file), None, None) => {
+                write!(rd, "[{}]", file)?;
+            }
+            (Some(file), None, Some(_)) => {
+                write!(rd, "[{}]", file.trim_matches('"'))?;
+            }
+            (Some(file), Some(line), None) => {
+                write!(rd, "[{}:{}]", file.trim_matches('"'), line)?;
+            }
+            (Some(file), Some(line), Some(col)) => {
+                write!(rd, "[{}:{}:{}]", file.trim_matches('"'), line, col)?;
+            }
         }
     }
-
-    rd.start_whitespace()?;
-    write!(rd, " ")?;
-
-    rd.start_level()?;
-    write!(rd, "{}", record.level().as_short_str())?;
 
     rd.start_whitespace()?;
     write!(rd, " ")?;
@@ -608,19 +638,20 @@ impl<'a> Drop for Serializer<'a> {
 
 macro_rules! s(
     ($s:expr, $k:expr, $v:expr) => {
-
-        if $s.reverse {
-            $s.stack.push(($k.into(), format!("{}", $v)));
-        } else {
-        $s.maybe_print_comma()?;
-        $s.decorator.start_key()?;
-        write!($s.decorator, "{}", $k)?;
-        $s.decorator.start_separator()?;
-        write!($s.decorator, ":")?;
-        $s.decorator.start_whitespace()?;
-        write!($s.decorator, " ")?;
-        $s.decorator.start_value()?;
-        write!($s.decorator, "{}", $v)?;
+        if !LABELS_TO_EXCLUDE.contains(&$k) {
+            if $s.reverse {
+                $s.stack.push(($k.into(), format!("{}", $v)));
+            } else {
+                $s.maybe_print_comma()?;
+                $s.decorator.start_key()?;
+                write!($s.decorator, "{}", $k)?;
+                $s.decorator.start_separator()?;
+                write!($s.decorator, ":")?;
+                $s.decorator.start_whitespace()?;
+                write!($s.decorator, " ")?;
+                $s.decorator.start_value()?;
+                write!($s.decorator, "{}", $v)?;
+            }
         }
     };
 );
@@ -676,6 +707,7 @@ impl<'a> slog::ser::Serializer for Serializer<'a> {
     }
     fn emit_i32(&mut self, key: Key, val: i32) -> slog::Result {
         s!(self, key, val);
+
         Ok(())
     }
     fn emit_f32(&mut self, key: Key, val: f32) -> slog::Result {
@@ -695,9 +727,7 @@ impl<'a> slog::ser::Serializer for Serializer<'a> {
         Ok(())
     }
     fn emit_str(&mut self, key: Key, val: &str) -> slog::Result {
-        if ![FILE, LINE, COLUMN, MODPATH, TARGET].contains(&key) {
-            s!(self, key, val);
-        }
+        s!(self, key, val);
         Ok(())
     }
     fn emit_arguments(
